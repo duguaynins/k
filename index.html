@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="auto">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title translate="no">K</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: manipulation;
+        }
+        /* 使用 dvh 確保在行動裝置網址列展開/收合時都能正確填滿可視區域 */
+        body, html {
+            width: 100%;
+            height: 100dvh;
+            background-color: #000000;
+            color: #ffffff;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Roboto, "Segoe UI", sans-serif;
+            overflow: hidden;
+        }
+
+        .chart-container {
+            background: linear-gradient(180deg, #020812 0%, #000000 100%);
+            position: relative;
+            width: 100%;
+            height: 100dvh;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            touch-action: none;
+        }
+    </style>
+</head>
+<body class="h-[100dvh] w-screen overflow-hidden">
+
+    <!-- 主圖（K線與均線）+ 副圖（成交量）畫布區 -->
+    <main class="w-full h-[100dvh] chart-container overflow-hidden" id="chartWrapper">
+        <canvas id="klineCanvas"></canvas>
+    </main>
+
+    <!-- 腳本邏輯 -->
+    <script>
+        // 全局變數
+        let klineData = [];
+        let touchPos = { x: -1, y: -1, active: false };
+        let selectedIndex = -1;
+        let baseStartPrice = 240.00;
+
+        const canvas = document.getElementById('klineCanvas');
+        const ctx = canvas.getContext('2d');
+        const wrapper = document.getElementById('chartWrapper');
+
+        // 取得目前時間字串 (HH:MM:SS)
+        function getFormattedTime(dateObj = new Date()) {
+            const h = String(dateObj.getHours()).padStart(2, '0');
+            const m = String(dateObj.getMinutes()).padStart(2, '0');
+            const s = String(dateObj.getSeconds()).padStart(2, '0');
+            return `${h}:${m}:${s}`;
+        }
+
+        // 初始生成
+        function startFromCurrentTime() {
+            klineData = [];
+            const now = new Date();
+            const startPrice = parseFloat((200 + Math.random() * 50).toFixed(2));
+            baseStartPrice = startPrice;
+
+            klineData.push({
+                timeStr: getFormattedTime(now),
+                open: startPrice,
+                close: startPrice,
+                high: startPrice,
+                low: startPrice,
+                volume: Math.floor(Math.random() * 20 + 5)
+            });
+
+            selectedIndex = -1;
+            render();
+        }
+
+        // MA 均線計算
+        function calcMA(period, index) {
+            if (index < period - 1) return null;
+            let sum = 0;
+            for (let i = index - period + 1; i <= index; i++) {
+                sum += klineData[i].close;
+            }
+            return sum / period;
+        }
+
+        // DPI 自適應
+        function resizeCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = wrapper.getBoundingClientRect();
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            ctx.scale(dpr, dpr);
+            render();
+        }
+
+        // 渲染圖表
+        function render() {
+            const rect = wrapper.getBoundingClientRect();
+            const width = rect.width;
+            const height = rect.height;
+
+            ctx.clearRect(0, 0, width, height);
+            if (klineData.length === 0) return;
+
+            // 預留底部時間軸高度 20px
+            const timeAxisHeight = 20;
+            const drawableHeight = height - timeAxisHeight;
+
+            // 主圖高度占 70%，副圖占 20%
+            const klineHeight = drawableHeight * 0.72;
+            const volHeight = drawableHeight * 0.22;
+            const paddingRight = 48;
+            const timeAxisY = height - 5;
+
+            let minPrice = Infinity;
+            let maxPrice = -Infinity;
+            let maxVol = 0;
+
+            klineData.forEach(d => {
+                if (d.low < minPrice) minPrice = d.low;
+                if (d.high > maxPrice) maxPrice = d.high;
+                if (d.volume > maxVol) maxVol = d.volume;
+            });
+
+            const pricePad = (maxPrice - minPrice) * 0.08 || 2;
+            maxPrice += pricePad;
+            minPrice -= pricePad;
+
+            const getY = (p) => klineHeight - ((p - minPrice) / (maxPrice - minPrice)) * (klineHeight - 16);
+            // 成交量底部定位在 drawableHeight
+            const getVolY = (v) => drawableHeight - (v / (maxVol || 1)) * volHeight;
+
+            // 動態縮放佈局
+            const maxVisibleBars = Math.max(klineData.length, 25);
+            const drawableWidth = width - paddingRight;
+            const barWidth = drawableWidth / maxVisibleBars;
+            const candleWidth = Math.max(barWidth * 0.68, 2);
+
+            // 水平參考線與右側價格標籤
+            ctx.strokeStyle = '#121e2d';
+            ctx.lineWidth = 1;
+            ctx.fillStyle = '#64748b';
+            ctx.font = '9px monospace';
+            ctx.textAlign = 'left';
+
+            for (let i = 1; i <= 4; i++) {
+                const p = minPrice + (maxPrice - minPrice) * (i / 5);
+                const y = getY(p);
+                ctx.beginPath();
+                ctx.setLineDash([2, 2]);
+                ctx.moveTo(0, y);
+                ctx.lineTo(drawableWidth, y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillText(p.toFixed(1), drawableWidth + 4, y + 3);
+            }
+
+            // 繪製 K 棒（主圖）與成交量（副圖）
+            const ma5Points = [];
+            const ma20Points = [];
+
+            klineData.forEach((d, i) => {
+                const x = i * barWidth + barWidth / 2;
+                const isUp = d.close >= d.open;
+                const color = isUp ? '#ff3b30' : '#34c759';
+
+                // 主圖：K棒影線
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                ctx.moveTo(x, getY(d.high));
+                ctx.lineTo(x, getY(d.low));
+                ctx.stroke();
+
+                // 主圖：K棒實體
+                const openY = getY(d.open);
+                const closeY = getY(d.close);
+                const bodyY = Math.min(openY, closeY);
+                const bodyH = Math.max(Math.abs(openY - closeY), 1.5);
+
+                ctx.fillStyle = color;
+                ctx.fillRect(x - candleWidth / 2, bodyY, candleWidth, bodyH);
+
+                // 副圖：成交量柱狀圖
+                const vY = getVolY(d.volume);
+                ctx.fillStyle = isUp ? 'rgba(255, 59, 48, 0.35)' : 'rgba(52, 199, 89, 0.35)';
+                ctx.fillRect(x - candleWidth / 2, vY, candleWidth, drawableHeight - vY);
+
+                const ma5 = calcMA(5, i);
+                const ma20 = calcMA(20, i);
+                if (ma5 !== null) ma5Points.push({ x, y: getY(ma5) });
+                if (ma20 !== null) ma20Points.push({ x, y: getY(ma20) });
+            });
+
+            // 主圖：移動平均線
+            const drawMA = (pts, color) => {
+                if (pts.length < 2) return;
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x, pts[0].y);
+                for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+                ctx.stroke();
+            };
+            drawMA(ma5Points, '#eab308');
+            drawMA(ma20Points, '#3b82f6');
+
+            // 時間軸標籤
+            ctx.fillStyle = '#64748b';
+            ctx.font = '9px monospace';
+            ctx.textAlign = 'center';
+
+            const sampleTimeStr = klineData[0]?.timeStr || '00:00:00';
+            const approxTextWidth = ctx.measureText(sampleTimeStr).width || 48;
+            const minLabelSpacing = approxTextWidth + 24;
+
+            const maxAllowedLabels = Math.max(1, Math.floor(drawableWidth / minLabelSpacing));
+            const step = Math.max(1, Math.ceil(klineData.length / maxAllowedLabels));
+
+            let lastDrawnX = -999;
+            klineData.forEach((d, i) => {
+                const x = i * barWidth + barWidth / 2;
+                const isLastBar = (i === klineData.length - 1);
+
+                if ((i % step === 0 || isLastBar) && (x - lastDrawnX >= minLabelSpacing || isLastBar)) {
+                    if (isLastBar && (x - lastDrawnX < minLabelSpacing) && lastDrawnX > 0) {
+                        ctx.clearRect(lastDrawnX - (approxTextWidth / 2) - 2, timeAxisY - 10, approxTextWidth + 4, 14);
+                    }
+                    if (x <= drawableWidth - 10) {
+                        ctx.fillText(d.timeStr, x, timeAxisY);
+                        lastDrawnX = x;
+                    }
+                }
+            });
+
+            // 十字準心互動檢視
+            if (touchPos.active && touchPos.x >= 0 && touchPos.x <= drawableWidth) {
+                const hoveredIdx = Math.floor(touchPos.x / barWidth);
+                if (hoveredIdx >= 0 && hoveredIdx < klineData.length) {
+                    selectedIndex = hoveredIdx;
+                    const snapX = hoveredIdx * barWidth + barWidth / 2;
+
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([2, 2]);
+
+                    ctx.beginPath();
+                    ctx.moveTo(snapX, 0); ctx.lineTo(snapX, drawableHeight); ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(0, touchPos.y); ctx.lineTo(drawableWidth, touchPos.y); ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+            } else {
+                selectedIndex = -1;
+            }
+
+            // 右側最新價標籤
+            const lastBar = klineData[klineData.length - 1];
+            if (lastBar) {
+                const lastY = getY(lastBar.close);
+                const isUp = lastBar.close >= (klineData[klineData.length - 2]?.close || lastBar.open);
+                const tagColor = isUp ? '#ff3b30' : '#34c759';
+
+                ctx.setLineDash([2, 2]);
+                ctx.strokeStyle = tagColor;
+                ctx.beginPath();
+                ctx.moveTo(0, lastY); ctx.lineTo(drawableWidth, lastY); ctx.stroke();
+                ctx.setLineDash([]);
+
+                ctx.fillStyle = tagColor;
+                ctx.fillRect(drawableWidth, lastY - 8, paddingRight, 16);
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 9px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(lastBar.close.toFixed(2), drawableWidth + (paddingRight / 2), lastY + 3);
+            }
+        }
+
+        // 實時動態隨機 Tick 高頻生長
+        function onTick() {
+            if (klineData.length === 0) return;
+
+            const lastBar = klineData[klineData.length - 1];
+            const delta = (Math.random() - 0.485) * 0.8;
+            const newClose = parseFloat((lastBar.close + delta).toFixed(2));
+
+            lastBar.close = newClose;
+            lastBar.high = Math.max(lastBar.high, newClose);
+            lastBar.low = Math.min(lastBar.low, newClose);
+            lastBar.volume += Math.floor(Math.random() * 15 + 1);
+
+            // 隨機生成下一根 K 棒
+            if (Math.random() < 0.12) {
+                const now = new Date();
+                
+                if (klineData.length >= 80) {
+                    klineData.shift();
+                }
+
+                klineData.push({
+                    timeStr: getFormattedTime(now),
+                    open: newClose,
+                    close: newClose,
+                    high: newClose,
+                    low: newClose,
+                    volume: Math.floor(Math.random() * 20 + 2)
+                });
+            }
+
+            render();
+        }
+
+        // 手勢與繪圖事件綁定
+        function setupEvents() {
+            const handlePointer = (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+                touchPos.x = clientX - rect.left;
+                touchPos.y = clientY - rect.top;
+                touchPos.active = true;
+                render();
+            };
+
+            const handlePointerEnd = () => {
+                touchPos.active = false;
+                selectedIndex = -1;
+                render();
+            };
+
+            canvas.addEventListener('mousemove', handlePointer);
+            canvas.addEventListener('mouseleave', handlePointerEnd);
+
+            canvas.addEventListener('touchstart', (e) => { handlePointer(e); }, { passive: true });
+            canvas.addEventListener('touchmove', (e) => { handlePointer(e); }, { passive: true });
+            canvas.addEventListener('touchend', handlePointerEnd);
+
+            window.addEventListener('resize', resizeCanvas);
+        }
+
+        // 初始化
+        window.onload = function() {
+            startFromCurrentTime();
+            setupEvents();
+            resizeCanvas();
+            setInterval(onTick, 250);
+        };
+    </script>
+</body>
+</html>
